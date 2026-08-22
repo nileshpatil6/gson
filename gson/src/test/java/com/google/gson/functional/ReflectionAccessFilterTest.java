@@ -81,6 +81,32 @@ public class ReflectionAccessFilterTest {
   }
 
   @Test
+  public void testBlockInaccessibleJavaRepeatedCallsAlwaysThrow() {
+    Gson gson =
+        new GsonBuilder()
+            .addReflectionAccessFilter(ReflectionAccessFilter.BLOCK_INACCESSIBLE_JAVA)
+            .create();
+
+    // The accessibility check result must not be cached for a failed check: every call on the
+    // same Gson instance (and therefore the same cached BoundField) must keep throwing instead of
+    // silently succeeding after the first failure.
+    for (int i = 0; i < 3; i++) {
+      var e =
+          assertThrows(
+              "Expected exception; test needs to be run with Java >= 9",
+              JsonIOException.class,
+              () -> gson.toJson(new File("a")));
+      assertThat(e)
+          .hasMessageThat()
+          .isEqualTo(
+              "Field 'java.io.File#path' is not accessible and ReflectionAccessFilter does not"
+                  + " permit making it accessible. Register a TypeAdapter for the declaring type,"
+                  + " adjust the access filter or increase the visibility of the element and its"
+                  + " declaring type.");
+    }
+  }
+
+  @Test
   public void testDontBlockAccessibleJava() throws ReflectiveOperationException {
     Gson gson =
         new GsonBuilder()
@@ -100,6 +126,44 @@ public class ReflectionAccessFilterTest {
     Object point = pointConstructor.newInstance(1, 2);
     String json = gson.toJson(point);
     assertThat(json).isEqualTo("{\"x\":1,\"y\":2}");
+  }
+
+  // Must be a public nested class with a public field so that the field is naturally accessible
+  // (without needing `setAccessible`) even though a BLOCK_INACCESSIBLE filter is in effect. A
+  // public no-args constructor is required for the same reason so that deserialization can create
+  // an instance in the first place.
+  public static class ClassWithPublicField {
+    public int i;
+
+    public ClassWithPublicField() {}
+
+    public ClassWithPublicField(int i) {
+      this.i = i;
+    }
+  }
+
+  @Test
+  public void testDontBlockAccessibleFieldRepeatedCallsShareCache() {
+    Gson gson =
+        new GsonBuilder()
+            .addReflectionAccessFilter(
+                new ReflectionAccessFilter() {
+                  @Override
+                  public FilterResult check(Class<?> rawClass) {
+                    return FilterResult.BLOCK_INACCESSIBLE;
+                  }
+                })
+            .create();
+
+    // The same BoundField backs both serialization and deserialization of this field, so the
+    // known-accessible flag set by one direction must be visible to the other, and repeated calls
+    // in either direction must keep succeeding.
+    assertThat(gson.toJson(new ClassWithPublicField(1))).isEqualTo("{\"i\":1}");
+    ClassWithPublicField deserialized = gson.fromJson("{\"i\":2}", ClassWithPublicField.class);
+    assertThat(deserialized.i).isEqualTo(2);
+    assertThat(gson.toJson(new ClassWithPublicField(3))).isEqualTo("{\"i\":3}");
+    deserialized = gson.fromJson("{\"i\":4}", ClassWithPublicField.class);
+    assertThat(deserialized.i).isEqualTo(4);
   }
 
   @Test
@@ -297,6 +361,46 @@ public class ReflectionAccessFilterTest {
     // Inherited (inaccessible) private field should have been made accessible
     String json = gson2.toJson(new ExtendingClassWithPrivateField());
     assertThat(json).isEqualTo("{\"i\":1}");
+  }
+
+  // Public class and no-args constructor so only the private field trips the accessibility check.
+  public static class ClassWithPrivateFieldAccessibleConstructor {
+    @SuppressWarnings("unused")
+    private int i;
+
+    public ClassWithPrivateFieldAccessibleConstructor() {}
+  }
+
+  @Test
+  public void testBlockInaccessibleFieldRepeatedDeserializationAlwaysThrows() {
+    Gson gson =
+        new GsonBuilder()
+            .addReflectionAccessFilter(
+                new ReflectionAccessFilter() {
+                  @Override
+                  public FilterResult check(Class<?> rawClass) {
+                    return FilterResult.BLOCK_INACCESSIBLE;
+                  }
+                })
+            .create();
+
+    // Like the serialization case, a failed accessibility check on the deserialization side must
+    // never be cached, so every call keeps throwing.
+    for (int i = 0; i < 3; i++) {
+      var e =
+          assertThrows(
+              "Expected exception; test needs to be run with Java >= 9",
+              JsonIOException.class,
+              () -> gson.fromJson("{\"i\":1}", ClassWithPrivateFieldAccessibleConstructor.class));
+      assertThat(e)
+          .hasMessageThat()
+          .isEqualTo(
+              "Field"
+                  + " 'com.google.gson.functional.ReflectionAccessFilterTest$ClassWithPrivateFieldAccessibleConstructor#i'"
+                  + " is not accessible and ReflectionAccessFilter does not permit making it"
+                  + " accessible. Register a TypeAdapter for the declaring type, adjust the access"
+                  + " filter or increase the visibility of the element and its declaring type.");
+    }
   }
 
   private static class ClassWithPrivateNoArgsConstructor {
